@@ -136,11 +136,20 @@ class AppConfig(BaseModel):
 class ConfigManager:
     def __init__(self, config_dir: str = "./config"):
         self.config_dir = Path(config_dir)
+
+        # Load .env from project root first (if exists)
+        root_env_path = Path(".env")
+        if root_env_path.exists():
+            load_dotenv(root_env_path)
+
+        # Also load from config directory (if exists, for backward compatibility)
         env_path = self.config_dir / ".env"
         if env_path.exists():
-            load_dotenv(env_path)
-        else:
-            print(f"Warning: .env file not found at {env_path}")
+            load_dotenv(env_path, override=True)
+
+        if not root_env_path.exists() and not env_path.exists():
+            print("Warning: .env file not found at ./.env or ./config/.env")
+
         self._config = self._load_config()
 
     def _load_config(self) -> AppConfig:
