@@ -1,4 +1,4 @@
-# Implementation Plan: Modular LLM Knowledge Exploration Framework
+# Implementation Plan: Modular LLM Knowledge Exploration Framework (with Meilisearch Hybrid Retrieval)
 
 ## 1. Project Structure
 
@@ -41,7 +41,9 @@ kBase/
 │   │   ├── document_processor.py # PDF/TXT parsing and chunking
 │   │   ├── embeddings.py         # Embedding generation
 │   │   ├── vector_store.py       # Vector DB interface
-│   │   └── retriever.py          # Retrieval logic
+│   │   ├── meilisearch_store.py  # Meilisearch lexical search
+│   │   ├── hybrid_retriever.py   # Hybrid retrieval (semantic + lexical)
+│   │   └── retriever.py          # Base retriever interface
 │   ├── memory/
 │   │   ├── __init__.py
 │   │   ├── short_term.py         # Conversation buffer
@@ -59,6 +61,7 @@ kBase/
 │   └── (document storage folder)
 ├── data/
 │   ├── vector_db/               # Vector database persistence
+│   ├── meilisearch/             # Meilisearch data directory
 │   └── conversations.db         # SQLite conversation storage
 ├── tests/
 │   ├── __init__.py
@@ -93,11 +96,35 @@ vector_db:
   persist_path: "./data/vector_db"
   collection_name: "documents"
 
+meilisearch:
+  host: "http://localhost:7700"
+  api_key: "${MEILISEARCH_API_KEY:}"  # Optional, for production
+  index_name: "documents"
+  data_path: "./data/meilisearch"
+  auto_start: true  # Auto-start local Meilisearch instance
+  search_attributes:
+    - "content"
+    - "source_file"
+  filterable_attributes:
+    - "source_file"
+    - "page_number"
+
 embedding:
   provider: "openai"  # Options: openai, huggingface, sentence-transformers
   model: "text-embedding-3-small"
   chunk_size: 1000
   chunk_overlap: 200
+
+hybrid_retrieval:
+  enabled: true
+  semantic_weight: 0.6  # Weight for vector search results
+  lexical_weight: 0.4   # Weight for Meilisearch results
+  fusion_method: "rrf"  # Options: rrf (Reciprocal Rank Fusion), weighted, union
+  rrf_k: 60             # RRF constant
+  semantic_top_k: 10
+  lexical_top_k: 10
+  rerank_enabled: false
+  rerank_model: null    # e.g., "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 memory:
   short_term:
@@ -207,8 +234,11 @@ agents:
     enabled: true
     model: "${LLM_RAG_MODEL:gpt-4}"
     temperature: 0.5
-    top_k_results: 5
-    min_relevance_score: 0.7
+    retrieval:
+      mode: "hybrid"  # Options: semantic, lexical, hybrid
+      semantic_top_k: 10
+      lexical_top_k: 10
+      min_relevance_score: 0.7
     prompt_template: |
       Based on the following documents, answer the query.
       
@@ -217,7 +247,7 @@ agents:
       
       Query: {query}
       
-      Provide a comprehensive answer with citations.
+      Provide a comprehensive answer with citations like [Document: filename.pdf, Page: X].
 
   summarizer:
     enabled: true
@@ -276,6 +306,10 @@ CUSTOM_LLM_API_BASE=https://your-api-endpoint.com/v1
 
 # Web Search API
 WEB_SEARCH_API_KEY=your-search-api-key
+
+# Meilisearch (Optional API key for production)
+MEILISEARCH_API_KEY=
+MEILISEARCH_HOST=http://localhost:7700
 
 # Langfuse Observability
 LANGFUSE_PUBLIC_KEY=pk-lf-xxx
@@ -496,10 +530,10 @@ class LLMFactory:
 
 #### Step 3.1: Document Processing
 - [ ] Implement `src/rag/document_processor.py`
-  - PDF parsing (PyPDF2)
+  - PDF parsing (pypdf)
   - TXT file reading
-  - Document chunking strategies
-  - Metadata extraction
+  - Document chunking strategies (recursive, semantic)
+  - Metadata extraction (filename, page number, chunk index)
 
 **Dependencies (add with `uv add`):**
 ```bash
@@ -518,12 +552,12 @@ uv add pypdf langchain-text-splitters
 uv add sentence-transformers
 ```
 
-#### Step 3.3: Vector Store
+#### Step 3.3: Vector Store (Semantic Search)
 - [ ] Implement `src/rag/vector_store.py`
   - Abstract vector store interface
   - ChromaDB implementation
   - FAISS implementation (optional)
-  - CRUD operations for documents
+  - CRUD operations for document chunks
   - Persistence management
 
 **Dependencies (add with `uv add`):**
@@ -532,12 +566,72 @@ uv add chromadb  # Core vector store
 uv add faiss-cpu  # Optional, for local FAISS support
 ```
 
-#### Step 3.4: Retriever
-- [ ] Implement `src/rag/retriever.py`
-  - Similarity search
-  - Hybrid search (keyword + semantic)
-  - Re-ranking (optional)
-  - Context window optimization
+#### Step 3.4: Meilisearch Store (Lexical Search)
+- [ ] Implement `src/rag/meilisearch_store.py`
+  - Meilisearch client wrapper
+  - Document indexing with chunk metadata
+  - Keyword search with typo tolerance
+  - Filter and facet support
+  - Auto-start local Meilisearch instance
+  - Index management (create, delete, update)
+
+**Dependencies (add with `uv add`):**
+```bash
+uv add meilisearch-python-sdk
+```
+
+**Meilisearch Document Schema:**
+```python
+class MeiliDocument(BaseModel):
+    id: str                      # Unique chunk ID (e.g., "report.pdf_p1_c0")
+    content: str                 # Chunk text content
+    source_file: str             # Original filename
+    page_number: int             # Page number (if applicable)
+    chunk_index: int             # Chunk index within document
+    embedding_id: str            # Reference to vector DB ID
+    metadata: Optional[dict]     # Additional metadata
+```
+
+#### Step 3.5: Hybrid Retriever
+- [ ] Implement `src/rag/retriever.py` - Base retriever interface
+- [ ] Implement `src/rag/hybrid_retriever.py`
+  - Semantic search via vector store
+  - Lexical search via Meilisearch
+  - Result fusion strategies:
+    - Reciprocal Rank Fusion (RRF)
+    - Weighted combination
+    - Simple union
+  - Optional re-ranking with cross-encoder
+  - Deduplication of results
+
+**Hybrid Retrieval Flow:**
+```
+Query
+  ├── Semantic Search (Vector DB) → Top-K chunks with similarity scores
+  ├── Lexical Search (Meilisearch) → Top-M chunks with relevance scores
+  └── Fusion (RRF) → Combined ranked list
+       └── Optional Re-ranker → Final ranked list
+```
+
+**Reciprocal Rank Fusion (RRF) Algorithm:**
+```python
+def reciprocal_rank_fusion(
+    semantic_results: List[Chunk],
+    lexical_results: List[Chunk],
+    k: int = 60
+) -> List[Chunk]:
+    scores = {}
+    for rank, chunk in enumerate(semantic_results):
+        scores[chunk.id] = scores.get(chunk.id, 0) + 1 / (k + rank + 1)
+    for rank, chunk in enumerate(lexical_results):
+        scores[chunk.id] = scores.get(chunk.id, 0) + 1 / (k + rank + 1)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+```
+
+**Dependencies (optional for re-ranking):**
+```bash
+uv add sentence-transformers  # Already added, includes cross-encoder support
+```
 
 ---
 
@@ -619,8 +713,8 @@ class WorkflowState(TypedDict):
 #### Step 6.1: Langfuse Integration
 - [ ] Implement `src/observability/langfuse_handler.py`
   - Trace initialization
-  - Span management
-  - Metadata tagging
+  - Span management (including Meilisearch indexing/search spans)
+  - Metadata tagging (Meilisearch query, hits, ranking)
   - Cost tracking
   - Error logging
 
@@ -640,10 +734,11 @@ uv add langfuse
 ### Phase 7: CLI Commands & Integration (Week 10)
 
 #### Step 7.1: Document Management Commands
-- [ ] `ingest --path <path>` - Ingest documents
-- [ ] `list-docs` - List indexed documents
-- [ ] `remove-doc <doc_id>` - Remove document from index
-- [ ] `reindex` - Rebuild entire index
+- [ ] `ingest --path <path>` - Ingest documents (parse, chunk, embed, index to vector DB + Meilisearch)
+- [ ] `list-docs` - List indexed documents from both stores
+- [ ] `remove-doc <doc_id>` - Remove document from vector DB and Meilisearch
+- [ ] `reindex-docs` - Rebuild Meilisearch index from ingested documents
+- [ ] `search-docs <query>` - Test hybrid search on documents
 
 #### Step 7.2: Conversation Management Commands
 - [ ] `new-chat` - Start new conversation
@@ -706,10 +801,16 @@ uv add langfuse
     │  (LangGraph + Agents)                     │
     └────┬──────────────────────────────────────┘
          │
-    ┌────▼────┐
-    │   RAG   │
-    │ Module  │
-    └─────────┘
+    ┌────▼──────────────────────────────────────┐
+    │              RAG Module                    │
+    │  ┌─────────────┐    ┌─────────────────┐   │
+    │  │ Vector DB   │    │   Meilisearch   │   │
+    │  │ (Semantic)  │    │   (Lexical)     │   │
+    │  └──────┬──────┘    └────────┬────────┘   │
+    │         └──────────┬─────────┘            │
+    │                    ▼                      │
+    │           Hybrid Retriever                │
+    └───────────────────────────────────────────┘
 ```
 
 ## 5. Key Interfaces
@@ -760,19 +861,38 @@ async for chunk in llm.stream(prompt):
 ### 5.3 RAG Interface
 
 ```python
-from src.rag.retriever import Retriever
+from src.rag.hybrid_retriever import HybridRetriever
 from src.rag.document_processor import DocumentProcessor
+from src.rag.meilisearch_store import MeilisearchStore
+from src.rag.vector_store import VectorStore
 
-# Process documents
+# Process and index documents
 processor = DocumentProcessor(config.rag)
-await processor.ingest_directory("./docs")
+chunks = await processor.ingest_directory("./docs")
 
-# Retrieve relevant documents
-retriever = Retriever(config.rag)
+# Initialize stores
+vector_store = VectorStore(config.vector_db)
+meili_store = MeilisearchStore(config.meilisearch)
+
+# Index to both stores
+await vector_store.add_chunks(chunks)
+await meili_store.index_chunks(chunks)
+
+# Hybrid retrieval
+retriever = HybridRetriever(
+    vector_store=vector_store,
+    meilisearch_store=meili_store,
+    config=config.hybrid_retrieval
+)
+
 results = await retriever.retrieve(
     query="What is machine learning?",
-    top_k=5
+    mode="hybrid"  # Options: semantic, lexical, hybrid
 )
+
+# Results include source attribution
+for chunk in results:
+    print(f"[{chunk.source_file}, Page {chunk.page_number}]: {chunk.content[:100]}...")
 ```
 
 ### 5.4 Workflow Interface
@@ -894,18 +1014,41 @@ class DocumentProcessor:
         return parsers.get(file_type)
 ```
 
+### 7.4 Swapping Lexical Search Engine
+
+```python
+# src/rag/lexical_store.py (abstract interface)
+from abc import ABC, abstractmethod
+
+class LexicalStore(ABC):
+    @abstractmethod
+    async def index_chunks(self, chunks: List[Chunk]) -> None: ...
+    
+    @abstractmethod
+    async def search(self, query: str, top_k: int) -> List[Chunk]: ...
+
+# Currently using Meilisearch
+# Can swap to Elasticsearch, Typesense, etc.
+class MeilisearchStore(LexicalStore):
+    ...
+
+# Future: Elasticsearch implementation
+class ElasticsearchStore(LexicalStore):
+    ...
+```
+
 ## 8. Development Timeline
 
 | Phase | Duration | Deliverables |
 |-------|----------|--------------|
 | 1. Foundation | 2 weeks | Project structure, config module, CLI foundation |
 | 2. LLM Layer | 1 week | LLM abstraction, OpenAI implementation, factory |
-| 3. RAG Module | 2 weeks | Document processing, embeddings, vector store |
+| 3. RAG Module | 2.5 weeks | Document processing, embeddings, vector store, Meilisearch, hybrid retriever |
 | 4. Memory | 1 week | Short-term and long-term memory |
 | 5. Agents | 2 weeks | All agents and workflow orchestrator |
-| 6. Observability | 1 week | Langfuse integration |
-| 7. CLI Integration | 1 week | All CLI commands |
-| 8. Testing & Docs | 2 weeks | Tests and documentation |
+| 6. Observability | 1 week | Langfuse integration with Meilisearch spans |
+| 7. CLI Integration | 1 week | All CLI commands including document management |
+| 8. Testing & Docs | 1.5 weeks | Tests and documentation |
 
 **Total: 12 weeks**
 
@@ -918,6 +1061,9 @@ class DocumentProcessor:
 | Token limit exceeded | Automatic context summarization |
 | Configuration errors | Schema validation with helpful error messages |
 | Vector DB corruption | Regular backups and integrity checks |
+| Meilisearch not running | Auto-start local instance, graceful fallback to semantic-only |
+| Meilisearch index out of sync | Sync checks on startup, reindex-docs command |
+| Hybrid retrieval latency | Parallel searches, configurable timeout |
 
 ## 10. Success Criteria
 
@@ -925,9 +1071,12 @@ class DocumentProcessor:
 - [ ] LLM provider swappable without code changes
 - [ ] Agent workflow configurable via YAML
 - [ ] Document storage path configurable
-- [ ] Full observability with Langfuse
+- [ ] Full observability with Langfuse (including Meilisearch operations)
 - [ ] Conversation persistence working
 - [ ] All CLI commands functional
+- [ ] Hybrid retrieval (semantic + lexical) working
+- [ ] Meilisearch auto-start and management
+- [ ] RRF fusion for result combination
 - [ ] >80% test coverage
 - [ ] Documentation complete
 
@@ -951,6 +1100,7 @@ uv add openai tenacity tiktoken
 **Phase 3 - RAG Module:**
 ```bash
 uv add pypdf langchain-text-splitters sentence-transformers chromadb
+uv add meilisearch-python-sdk  # Meilisearch lexical search
 uv add faiss-cpu  # Optional
 ```
 
@@ -999,6 +1149,7 @@ dependencies = [
     "langchain-text-splitters>=0.0.1",
     "sentence-transformers>=2.0.0",
     "chromadb>=0.4.0",
+    "meilisearch-python-sdk>=2.0.0",  # Meilisearch lexical search
     # "faiss-cpu>=1.7.0",  # Optional
     
     # Memory (Phase 4)
