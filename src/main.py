@@ -1,4 +1,3 @@
-import click
 from src.core.config import ConfigManager
 from src.cli.commands import CLI
 

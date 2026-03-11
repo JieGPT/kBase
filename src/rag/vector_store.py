@@ -1,6 +1,5 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 import chromadb
-from chromadb.config import Settings
 from .document_processor import Document
 
 
