@@ -1,11 +1,26 @@
-import os
+"""LLM client implementation using LangChain."""
+
 from typing import AsyncIterator, Optional
-from openai import AsyncOpenAI
-import tiktoken
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from langchain_core.callbacks import BaseCallbackHandler
 from .base import BaseLLM, LLMResponse
 
 
+class StreamingCallbackHandler(BaseCallbackHandler):
+    """Callback handler for streaming LLM responses."""
+
+    def __init__(self):
+        self.tokens = []
+
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        """Collect tokens as they're generated."""
+        self.tokens.append(token)
+
+
 class OpenAIClient(BaseLLM):
+    """OpenAI-compatible LLM client using LangChain."""
+
     def __init__(
         self,
         model: str = "gpt-4o-mini",
@@ -14,72 +29,134 @@ class OpenAIClient(BaseLLM):
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
     ):
-        # Use provided values or fall back to legacy env var for backward compatibility
-        api_key_str: str = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY") or ""
-        base_url_str: Optional[str] = base_url or os.getenv("BASE_URL")
+        """Initialize the OpenAI client.
 
-        if not api_key_str:
-            raise ValueError(
-                "API key is required. Set API_KEY or OPENAI_API_KEY environment variable."
-            )
+        Args:
+            model: Model name to use
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens in response
+            base_url: Optional base URL for API
+            api_key: Optional API key
+        """
+        # Build kwargs for ChatOpenAI
+        kwargs = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
 
-        if base_url_str:
-            self.client = AsyncOpenAI(api_key=api_key_str, base_url=base_url_str)
-        else:
-            self.client = AsyncOpenAI(api_key=api_key_str)
+        if api_key:
+            kwargs["api_key"] = api_key
+        if base_url:
+            kwargs["base_url"] = base_url
+
+        self.client = ChatOpenAI(**kwargs)
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        # Get tiktoken encoding - handle non-OpenAI models gracefully
-        try:
-            self._encoding = tiktoken.encoding_for_model(model)
-        except KeyError:
-            # Model not recognized by tiktoken, use default encoding
-            # cl100k_base is used by GPT-4, GPT-3.5-turbo, and text-embedding-3
-            self._encoding = tiktoken.get_encoding("cl100k_base")
-
     async def generate(self, prompt: str, **kwargs) -> LLMResponse:
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=kwargs.get("temperature", self.temperature),
-            max_tokens=kwargs.get("max_tokens", self.max_tokens),
-        )
-        content = response.choices[0].message.content or ""
-        tokens_used = response.usage.total_tokens if response.usage else 0
+        """Generate a response from the LLM.
+
+        Args:
+            prompt: The input prompt
+            **kwargs: Additional parameters
+
+        Returns:
+            LLMResponse with content and metadata
+        """
+        # Create message
+        message = HumanMessage(content=prompt)
+
+        # Call LLM
+        response = await self.client.ainvoke([message])
+
+        # Get token usage if available
+        tokens_used = 0
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            tokens_used = response.usage_metadata.get("total_tokens", 0)
+
         return LLMResponse(
-            content=content,
+            content=response.content,
             tokens_used=tokens_used,
             model=self.model,
         )
 
     async def stream(self, prompt: str, **kwargs) -> AsyncIterator[str]:
-        stream = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=kwargs.get("temperature", self.temperature),
-            max_tokens=kwargs.get("max_tokens", self.max_tokens),
-            stream=True,
-        )
-        async for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        """Stream a response from the LLM.
+
+        Args:
+            prompt: The input prompt
+            **kwargs: Additional parameters
+
+        Yields:
+            Text chunks as they're generated
+        """
+        # Create message
+        message = HumanMessage(content=prompt)
+
+        # Stream response
+        async for chunk in self.client.astream([message]):
+            if chunk.content:
+                yield chunk.content
 
     def count_tokens(self, text: str) -> int:
-        return len(self._encoding.encode(text))
+        """Count tokens in text.
+
+        Args:
+            text: Text to count
+
+        Returns:
+            Token count
+        """
+        # Use LangChain's token counting
+        try:
+            return self.client.get_num_tokens(text)
+        except Exception:
+            # Fallback: rough estimate (approx 4 chars per token)
+            return len(text) // 4
 
     async def generate_with_messages(self, messages: list, **kwargs) -> LLMResponse:
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=kwargs.get("temperature", self.temperature),
-            max_tokens=kwargs.get("max_tokens", self.max_tokens),
+        """Generate response from list of messages.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            **kwargs: Additional parameters
+
+        Returns:
+            LLMResponse with content and metadata
+        """
+        from langchain_core.messages import (
+            HumanMessage,
+            AIMessage,
+            SystemMessage,
         )
-        content = response.choices[0].message.content or ""
-        tokens_used = response.usage.total_tokens if response.usage else 0
+
+        # Convert dict messages to LangChain messages
+        lc_messages = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            if role == "user":
+                lc_messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                lc_messages.append(AIMessage(content=content))
+            elif role == "system":
+                lc_messages.append(SystemMessage(content=content))
+            else:
+                lc_messages.append(HumanMessage(content=content))
+
+        # Call LLM
+        response = await self.client.ainvoke(lc_messages)
+
+        # Get token usage if available
+        tokens_used = 0
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            tokens_used = response.usage_metadata.get("total_tokens", 0)
+
         return LLMResponse(
-            content=content,
+            content=response.content,
             tokens_used=tokens_used,
             model=self.model,
         )

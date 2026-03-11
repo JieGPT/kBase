@@ -16,6 +16,10 @@ class BaseLLM(ABC):
 
     @abstractmethod
     async def stream(self, prompt: str, **kwargs) -> AsyncIterator[str]:
+        """Stream response chunks.
+
+        This should be implemented as an async generator using 'yield'.
+        """
         pass
 
     @abstractmethod

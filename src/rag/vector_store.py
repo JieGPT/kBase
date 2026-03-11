@@ -1,54 +1,110 @@
+"""Vector store implementation using LangChain Chroma integration."""
+
 from typing import List, Dict, Any
-import chromadb
+from langchain_chroma import Chroma
+from langchain_core.documents import Document as LangchainDocument
 from .document_processor import Document
 
 
 class VectorStore:
+    """Vector store using LangChain's Chroma integration."""
+
     def __init__(self, persist_path: str, collection_name: str = "documents"):
-        self.client = chromadb.PersistentClient(path=persist_path)
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name, metadata={"hnsw:space": "cosine"}
+        """Initialize the vector store.
+
+        Args:
+            persist_path: Path to persist the database
+            collection_name: Name of the collection
+        """
+        self.persist_path = persist_path
+        self.collection_name = collection_name
+        # Initialize Chroma vector store
+        # Note: We don't pass embedding_function here as we handle embeddings externally
+        self.client = Chroma(
+            collection_name=collection_name,
+            persist_directory=persist_path,
         )
 
     def add_documents(self, documents: List[Document], embeddings: List[List[float]]):
-        ids = [doc.id for doc in documents]
-        contents = [doc.content for doc in documents]
-        metadatas = [doc.metadata or {} for doc in documents]
+        """Add documents with pre-computed embeddings.
 
-        self.collection.add(ids=ids, documents=contents, embeddings=embeddings, metadatas=metadatas)
+        Args:
+            documents: List of Document objects
+            embeddings: List of embedding vectors
+        """
+        # Convert to LangChain documents
+        lc_docs = []
+        for i, doc in enumerate(documents):
+            lc_doc = LangchainDocument(
+                page_content=doc.content,
+                metadata={
+                    "id": doc.id,
+                    "source": doc.source,
+                    "page": doc.page,
+                    **doc.metadata,
+                },
+            )
+            lc_docs.append(lc_doc)
+
+        # Add documents with embeddings
+        self.client.add_documents(lc_docs, embeddings=embeddings)
 
     def search(self, query_embedding: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"],
+        """Search for similar documents.
+
+        Args:
+            query_embedding: Query embedding vector
+            top_k: Number of results to return
+
+        Returns:
+            List of document dicts with id, content, metadata, distance
+        """
+        # Search by vector
+        results = self.client.similarity_search_by_vector_with_relevance_scores(
+            embedding=query_embedding,
+            k=top_k,
         )
 
+        # Convert to expected format
         retrieved = []
-        for i in range(len(results["ids"][0])):
+        for doc, score in results:
+            # score is similarity (higher is better), convert to distance (lower is better)
+            distance = 1.0 - score
             retrieved.append(
                 {
-                    "id": results["ids"][0][i],
-                    "content": results["documents"][0][i],
-                    "metadata": results["metadatas"][0][i],
-                    "distance": results["distances"][0][i],
+                    "id": doc.metadata.get("id", ""),
+                    "content": doc.page_content,
+                    "metadata": {
+                        "source": doc.metadata.get("source", ""),
+                        "page": doc.metadata.get("page"),
+                        **{
+                            k: v
+                            for k, v in doc.metadata.items()
+                            if k not in ["id", "source", "page"]
+                        },
+                    },
+                    "distance": distance,
                 }
             )
 
         return retrieved
 
     def count(self) -> int:
-        return self.collection.count()
+        """Get the number of documents in the collection."""
+        return self.client._collection.count()
 
     def get_document_ids(self) -> List[str]:
-        results = self.collection.get(include=[])
+        """Get all document IDs in the collection."""
+        results = self.client._collection.get(include=[])
         return results["ids"]
 
     def delete_documents(self, ids: List[str]):
+        """Delete documents by ID."""
         if ids:
-            self.collection.delete(ids=ids)
+            self.client._collection.delete(ids=ids)
 
     def clear(self):
+        """Clear all documents from the collection."""
         all_ids = self.get_document_ids()
         if all_ids:
-            self.collection.delete(ids=all_ids)
+            self.client._collection.delete(ids=all_ids)
