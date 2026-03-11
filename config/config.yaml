@@ -1,34 +1,41 @@
+# kBase Configuration
+# Note: Most settings below can be overridden via environment variables.
+# See .env.example for available environment variables.
+
 name: "kBase"
 version: "0.1.0-mvp"
-debug: false
+debug: false  # Override with DEBUG env var
 
 llm:
   provider: "openai"
-  model: "gpt-4o-mini"
-  temperature: 0.7
-  max_tokens: 2048
+  model: "gpt-4o-mini"  # Override with MODEL env var
+  temperature: 0.7      # Override with TEMPERATURE env var
+  max_tokens: 2048      # Override with MAX_TOKENS env var
+  # base_url: "https://api.openai.com/v1"  # Override with BASE_URL env var
+  # api_key: ""  # Override with API_KEY env var (or OPENAI_API_KEY)
 
 embedding:
   provider: "openai"
-  model: "text-embedding-3-small"
+  model: "text-embedding-3-small"  # Override with EMBEDDING_MODEL env var
+  # base_url and api_key inherit from llm settings unless specified
 
 vector_db:
   type: "chromadb"
-  persist_path: "./data/chromadb"
-  collection_name: "documents"
+  persist_path: "./data/chromadb"  # Override with VECTOR_DB_PERSIST_PATH env var
+  collection_name: "documents"       # Override with VECTOR_DB_COLLECTION env var
 
 document_storage:
-  path: "./docs"
+  path: "./docs"  # Override with DOC_PATH env var
   supported_formats:
     - ".pdf"
     - ".txt"
 
 chunking:
-  chunk_size: 1000
-  chunk_overlap: 200
+  chunk_size: 1000   # Override with CHUNK_SIZE env var
+  chunk_overlap: 200 # Override with CHUNK_OVERLAP env var
 
 memory:
-  max_turns: 5
+  max_turns: 5  # Override with MAX_TURNS env var
 
 retrieval:
-  top_k: 5
+  top_k: 5  # Override with TOP_K env var

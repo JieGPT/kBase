@@ -21,8 +21,14 @@ class CLI:
             model=config.config.llm.model,
             temperature=config.config.llm.temperature,
             max_tokens=config.config.llm.max_tokens,
+            base_url=config.config.llm.base_url,
+            api_key=config.config.llm.api_key,
         )
-        self.embedder = EmbeddingGenerator(model=config.config.embedding.model)
+        self.embedder = EmbeddingGenerator(
+            model=config.config.embedding.model,
+            base_url=config.config.embedding.base_url,
+            api_key=config.config.embedding.api_key,
+        )
         self.vector_store = VectorStore(
             persist_path=config.config.vector_db.persist_path,
             collection_name=config.config.vector_db.collection_name,
