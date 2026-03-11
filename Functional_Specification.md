@@ -99,6 +99,25 @@ This is the brain of your application, orchestrating complex tasks.
                         *   **Weighted Fusion:** Assign scores to chunks from both methods and combine them (e.g., using Reciprocal Rank Fusion - RRF).
                         *   **Re-ranking:** Use an LLM or a separate re-ranker model to score the combined set of chunks based on their relevance to the original query.
                     *   The goal is to get a comprehensive set of highly relevant chunks, leveraging the strengths of both retrieval methods.
+                
+                4.  **Re-ranking (Post-Retrieval Refinement):**
+                    *   **Purpose:** Re-ranking improves the quality of retrieved documents by using a more sophisticated model to score relevance after initial retrieval.
+                    *   **Implementation Options:**
+                        *   **Cross-Encoder Re-ranking:** Use a cross-encoder model (e.g., `cross-encoder/ms-marco-MiniLM-L-6-v2`) that jointly encodes the query and each document chunk to produce a relevance score. This is more accurate than bi-encoder (embedding) similarity.
+                        *   **LLM-based Re-ranking:** Use a lightweight LLM to score each chunk's relevance to the query on a scale (e.g., 0-10) or provide binary relevance judgments.
+                        *   **Hybrid Re-ranking:** Combine cross-encoder scores with LLM-based judgments for improved accuracy.
+                    *   **Process:**
+                        1.  Retrieve a larger candidate set from semantic and/or lexical search (e.g., top 20-50 chunks).
+                        2.  Apply the re-ranker to score each chunk against the original query.
+                        3.  Sort chunks by re-ranking score and select the top-k (e.g., top 5) for the final context.
+                    *   **Benefits:**
+                        *   Higher precision in retrieved documents.
+                        *   Reduced noise from false positives in semantic search.
+                        *   Better handling of lexical matches that may not align with semantic intent.
+                    *   **Configuration:**
+                        *   Enable/disable re-ranking via configuration.
+                        *   Select re-ranking model/provider.
+                        *   Configure candidate pool size (initial retrieval) vs. final selection size.
         *   **Augmentation:**
             *   Passes the selected and potentially re-ranked retrieved chunks along with the original query and conversation history to an LLM for contextualized answer generation. The LLM will be instructed to synthesize information from these chunks.
     *   **Summarization Agent:**
@@ -225,4 +244,6 @@ This section details how the application will maintain conversational context.
 *   **Cross-Conversation Learning:** (Advanced) Develop mechanisms for the system to learn general patterns or preferences from multiple conversations to improve future interactions.
 *   **Configuration File Management:** Use a configuration file (e.g., YAML, TOML) for easier management of LLM settings, API keys, and document paths.
 *   **Hybrid Retrieval Tuning:** Implement advanced strategies for combining semantic (vector) and lexical (Meilisearch) search results, such as Reciprocal Rank Fusion (RRF), to optimize retrieval relevance.
+*   **Re-ranking Configuration:** Allow CLI commands or configuration files to customize re-ranking behavior (e.g., enable/disable, select model, adjust candidate pool size).
+*   **Re-ranking Models:** Support for additional re-ranking models beyond cross-encoders, such as ColBERT or LLM-based re-rankers.
 *   **Meilisearch Configuration:** Allow CLI commands or configuration files to customize Meilisearch settings (e.g., searchable attributes, sortable attributes, stop words, synonyms).

@@ -96,6 +96,9 @@ memory:
 
 retrieval:
   top_k: 5
+  rerank_enabled: false  # Optional: enable for better retrieval quality
+  rerank_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  rerank_candidate_pool: 20
 ```
 
 ### 2.2 Environment Variables (`config/.env`)
@@ -613,6 +616,100 @@ async def test_rag_pipeline(temp_vector_store):
 
 ---
 
+### Phase 3.5 (Optional): Re-ranking Module (Day 10-11 Extension)
+
+**Objective:** Improve retrieval quality by adding a re-ranking step after initial semantic search.
+
+**Why Re-ranking?**
+- Cross-encoders achieve significantly better relevance scoring than bi-encoders (embeddings)
+- Filters out false positives from initial semantic search
+- Especially useful when query intent differs from semantic similarity
+
+**Implementation:**
+
+```python
+# src/rag/reranker.py (Optional enhancement)
+from typing import List
+from sentence_transformers import CrossEncoder
+
+class CrossEncoderReranker:
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+        self.model = CrossEncoder(model_name)
+    
+    def rerank(self, query: str, documents: List[Document], top_k: int = 5) -> List[Document]:
+        if not documents:
+            return documents
+        
+        # Create query-document pairs
+        pairs = [(query, doc.content) for doc in documents]
+        
+        # Get relevance scores from cross-encoder
+        scores = self.model.predict(pairs)
+        
+        # Sort by score and return top-k
+        scored_docs = list(zip(documents, scores))
+        scored_docs.sort(key=lambda x: x[1], reverse=True)
+        
+        return [doc for doc, _ in scored_docs[:top_k]]
+```
+
+**Integration in CLI:**
+
+```python
+# In src/cli/commands.py __init__
+if config.config.retrieval.rerank_enabled:
+    from src.rag.reranker import CrossEncoderReranker
+    self.reranker = CrossEncoderReranker(
+        model_name=config.config.retrieval.rerank_model
+    )
+else:
+    self.reranker = None
+
+# In process_query method
+async def process_query(self, query: str):
+    self.memory.add_user_message(query)
+    
+    # Retrieve candidates (larger pool if re-ranking)
+    candidate_k = self.config.config.retrieval.rerank_candidate_pool \
+        if self.reranker else self.config.config.retrieval.top_k
+    
+    query_embedding = self.embedder.embed_query(query)
+    results = self.vector_store.search(query_embedding, top_k=candidate_k)
+    
+    # Re-rank if enabled
+    if self.reranker:
+        results = self.reranker.rerank(
+            query, 
+            results, 
+            top_k=self.config.config.retrieval.top_k
+        )
+    
+    # Continue with context building...
+```
+
+**Dependencies:**
+```bash
+uv add sentence-transformers
+```
+
+**Configuration:**
+```yaml
+retrieval:
+  top_k: 5
+  rerank_enabled: true  # Set to false to disable
+  rerank_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  rerank_candidate_pool: 20  # Retrieve 20, re-rank to 5
+```
+
+**Trade-offs:**
+- ✅ Significantly improved retrieval accuracy
+- ✅ Better handling of precise queries
+- ❌ Additional latency (~100-500ms for 20 documents)
+- ❌ Additional memory usage for cross-encoder model
+- ❌ Extra dependency (sentence-transformers)
+
+---
+
 ### Phase 4: Memory & Query (Days 11-14)
 
 #### Day 11: Conversation Buffer
@@ -727,6 +824,10 @@ class CLI:
             query_embedding, 
             top_k=self.config.config.retrieval.top_k
         )
+        
+        # Optional: Re-ranking for improved retrieval quality
+        # if self.config.config.retrieval.rerank_enabled:
+        #     results = await self.rerank_results(query, results)
         
         # Build context
         if results:
@@ -928,11 +1029,16 @@ dev-dependencies = [
 After MVP is working:
 
 1. **Week 5-6:** Add Meilisearch for hybrid retrieval
-2. **Week 7-8:** Add conversation persistence (SQLite)
-3. **Week 9:** Add Langfuse observability
-4. **Week 10:** Add web search agent
-5. **Week 11-12:** Add multiple LLM providers
-6. **Week 13-14:** Add refinement agent, advanced features
+2. **Week 6-7:** Add re-ranking for improved retrieval quality
+   - Implement `src/rag/reranker.py` with cross-encoder support
+   - Add configuration for re-ranking (enable/disable, model selection)
+   - Integrate re-ranking into query processing pipeline
+   - Test and evaluate retrieval quality improvements
+3. **Week 7-8:** Add conversation persistence (SQLite)
+4. **Week 9:** Add Langfuse observability
+5. **Week 10:** Add web search agent
+6. **Week 11-12:** Add multiple LLM providers
+7. **Week 13-14:** Add refinement agent, advanced features
 
 ---
 

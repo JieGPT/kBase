@@ -123,8 +123,12 @@ hybrid_retrieval:
   rrf_k: 60             # RRF constant
   semantic_top_k: 10
   lexical_top_k: 10
-  rerank_enabled: false
-  rerank_model: null    # e.g., "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  rerank_enabled: true
+  rerank_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Cross-encoder model for re-ranking
+  rerank_provider: "sentence-transformers"  # Options: sentence-transformers, openai, cohere
+  rerank_candidate_pool: 20  # Number of candidates to retrieve before re-ranking
+  rerank_final_k: 5  # Number of chunks after re-ranking
+  rerank_batch_size: 8  # Batch size for re-ranking (cross-encoders are memory-intensive)
 
 memory:
   short_term:
@@ -239,6 +243,10 @@ agents:
       semantic_top_k: 10
       lexical_top_k: 10
       min_relevance_score: 0.7
+      rerank_enabled: true
+      rerank_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+      rerank_candidate_pool: 20
+      rerank_final_k: 5
     prompt_template: |
       Based on the following documents, answer the query.
       
@@ -592,7 +600,7 @@ class MeiliDocument(BaseModel):
     metadata: Optional[dict]     # Additional metadata
 ```
 
-#### Step 3.5: Hybrid Retriever
+#### Step 3.5: Hybrid Retriever with Re-ranking
 - [ ] Implement `src/rag/retriever.py` - Base retriever interface
 - [ ] Implement `src/rag/hybrid_retriever.py`
   - Semantic search via vector store
@@ -601,17 +609,158 @@ class MeiliDocument(BaseModel):
     - Reciprocal Rank Fusion (RRF)
     - Weighted combination
     - Simple union
-  - Optional re-ranking with cross-encoder
+  - **Re-ranking with cross-encoder or LLM**
   - Deduplication of results
 
 **Hybrid Retrieval Flow:**
 ```
 Query
-  ├── Semantic Search (Vector DB) → Top-K chunks with similarity scores
+  ├── Semantic Search (Vector DB) → Top-N chunks with similarity scores
   ├── Lexical Search (Meilisearch) → Top-M chunks with relevance scores
-  └── Fusion (RRF) → Combined ranked list
-       └── Optional Re-ranker → Final ranked list
+  └── Fusion (RRF) → Combined ranked list (candidate pool)
+       └── Re-ranker (Cross-Encoder/LLM) → Final top-K ranked list
 ```
+
+**Re-ranking Implementation:**
+
+The re-ranking step significantly improves retrieval quality by using a more sophisticated model to score the relevance of retrieved chunks to the query.
+
+```python
+# src/rag/reranker.py
+from abc import ABC, abstractmethod
+from typing import List
+from dataclasses import dataclass
+
+@dataclass
+class RerankResult:
+    chunk: Chunk
+    score: float  # Relevance score from re-ranker
+
+class BaseReranker(ABC):
+    @abstractmethod
+    async def rerank(self, query: str, chunks: List[Chunk]) -> List[RerankResult]:
+        """Re-rank chunks by relevance to query."""
+        pass
+
+class CrossEncoderReranker(BaseReranker):
+    """Cross-encoder based re-ranking using sentence-transformers."""
+    
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+        from sentence_transformers import CrossEncoder
+        self.model = CrossEncoder(model_name)
+    
+    async def rerank(self, query: str, chunks: List[Chunk]) -> List[RerankResult]:
+        # Cross-encoder jointly encodes query + document for accurate relevance
+        pairs = [(query, chunk.content) for chunk in chunks]
+        scores = self.model.predict(pairs)
+        
+        results = [
+            RerankResult(chunk=chunk, score=float(score))
+            for chunk, score in zip(chunks, scores)
+        ]
+        return sorted(results, key=lambda x: x.score, reverse=True)
+
+class LLMReranker(BaseReranker):
+    """LLM-based re-ranking for high-accuracy relevance scoring."""
+    
+    def __init__(self, llm: BaseLLM):
+        self.llm = llm
+    
+    async def rerank(self, query: str, chunks: List[Chunk]) -> List[RerankResult]:
+        results = []
+        for chunk in chunks:
+            prompt = f"""Rate the relevance of this document to the query on a scale of 0-10.
+            
+Query: {query}
+
+Document: {chunk.content[:500]}
+
+Relevance score (0-10):"""
+            
+            response = await self.llm.generate(prompt, max_tokens=10)
+            try:
+                score = float(response.content.strip()) / 10.0  # Normalize to 0-1
+            except ValueError:
+                score = 0.5  # Default mid-range score
+            
+            results.append(RerankResult(chunk=chunk, score=score))
+        
+        return sorted(results, key=lambda x: x.score, reverse=True)
+
+class HybridRetriever:
+    """Combines semantic, lexical search with re-ranking."""
+    
+    def __init__(
+        self,
+        vector_store: VectorStore,
+        meilisearch_store: MeilisearchStore,
+        reranker: Optional[BaseReranker] = None,
+        config: HybridRetrievalConfig = None
+    ):
+        self.vector_store = vector_store
+        self.meilisearch_store = meilisearch_store
+        self.reranker = reranker
+        self.config = config or HybridRetrievalConfig()
+    
+    async def retrieve(self, query: str, mode: str = "hybrid") -> List[Chunk]:
+        # Step 1: Retrieve candidate pool from semantic and lexical search
+        semantic_results = []
+        lexical_results = []
+        
+        if mode in ("semantic", "hybrid"):
+            semantic_results = await self.vector_store.search(
+                query, 
+                top_k=self.config.semantic_top_k
+            )
+        
+        if mode in ("lexical", "hybrid"):
+            lexical_results = await self.meilisearch_store.search(
+                query,
+                top_k=self.config.lexical_top_k
+            )
+        
+        # Step 2: Fuse results
+        if mode == "hybrid":
+            candidates = self._fuse_results(semantic_results, lexical_results)
+        else:
+            candidates = semantic_results or lexical_results
+        
+        # Step 3: Re-rank if enabled
+        if self.reranker and self.config.rerank_enabled:
+            reranked = await self.reranker.rerank(query, candidates)
+            return [r.chunk for r in reranked[:self.config.rerank_final_k]]
+        
+        return candidates[:self.config.top_k]
+    
+    def _fuse_results(
+        self, 
+        semantic: List[Chunk], 
+        lexical: List[Chunk]
+    ) -> List[Chunk]:
+        """Combine semantic and lexical results using RRF."""
+        scores = {}
+        
+        # RRF scoring
+        k = self.config.rrf_k
+        for rank, chunk in enumerate(semantic):
+            scores[chunk.id] = scores.get(chunk.id, 0) + 1 / (k + rank + 1)
+        
+        for rank, chunk in enumerate(lexical):
+            scores[chunk.id] = scores.get(chunk.id, 0) + 1 / (k + rank + 1)
+        
+        # Sort by score
+        sorted_ids = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # Reconstruct chunk list
+        chunk_map = {c.id: c for c in semantic + lexical}
+        return [chunk_map[id] for id, _ in sorted_ids[:self.config.rerank_candidate_pool]]
+```
+
+**Re-ranking Benefits:**
+- **Higher Precision:** Cross-encoders achieve significantly better relevance scoring than bi-encoders (embeddings)
+- **Noise Reduction:** Filters out false positives from initial retrieval
+- **Flexibility:** Can use different re-rankers based on accuracy/speed trade-offs
+- **Observability:** Re-ranking scores can be logged to Langfuse for evaluation
 
 **Reciprocal Rank Fusion (RRF) Algorithm:**
 ```python
