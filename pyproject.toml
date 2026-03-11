@@ -1,0 +1,45 @@
+[project]
+name = "kbase"
+version = "0.1.0"
+description = "LLM-Powered Knowledge Exploration Application (MVP)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+    "click>=8.1.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "openai>=1.0.0",
+    "tiktoken>=0.5.0",
+    "chromadb>=0.4.0",
+    "pypdf>=3.0.0",
+    "langchain-text-splitters>=0.0.1",
+    "prompt-toolkit>=3.0.0",
+    "pytest>=9.0.2",
+    "langchain>=1.2.11",
+]
+
+[tool.uv]
+# dev-dependencies field is deprecated
+# Use [project.optional-dependencies] instead
+
+[project.optional-dependencies]
+development = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+kbase = "src.main:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
