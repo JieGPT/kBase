@@ -30,7 +30,14 @@ class OpenAIClient(BaseLLM):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self._encoding = tiktoken.encoding_for_model(model)
+
+        # Get tiktoken encoding - handle non-OpenAI models gracefully
+        try:
+            self._encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            # Model not recognized by tiktoken, use default encoding
+            # cl100k_base is used by GPT-4, GPT-3.5-turbo, and text-embedding-3
+            self._encoding = tiktoken.get_encoding("cl100k_base")
 
     async def generate(self, prompt: str, **kwargs) -> LLMResponse:
         response = await self.client.chat.completions.create(
